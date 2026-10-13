@@ -125,6 +125,7 @@ begin
    for update;
   if not found then raise exception 'Menu order was not found'; end if;
   if order_row.payment_status <> 'paid' then return 'not_paid'; end if;
+  if order_row.total_amount <= 0 then raise exception 'A paid menu order must have a positive total'; end if;
 
   seller_organization_id := order_row.organization_id;
   if seller_organization_id is null then
@@ -151,6 +152,15 @@ begin
   ) then
     raise exception 'Menu order contains items from another or unmapped hotel';
   end if;
+
+  insert into public.books_accounts (organization_id, code, name, type, is_system)
+  values
+    (seller_organization_id, '1000', 'Cash and bank', 'asset', true),
+    (seller_organization_id, '1100', 'Accounts receivable', 'asset', true),
+    (seller_organization_id, '2100', 'VAT payable', 'liability', true),
+    (seller_organization_id, '2300', 'Tips payable', 'liability', true),
+    (seller_organization_id, '4000', 'Sales revenue', 'income', true)
+  on conflict (organization_id, code) do nothing;
 
   customer_name := nullif(trim(concat_ws(' ', order_row.first_name, order_row.last_name)), '');
   customer_email := nullif(trim(order_row.email), '');
@@ -205,8 +215,9 @@ begin
     select * into invoice_row
       from public.books_invoices
      where id = order_row.books_invoice_id;
-    if not found or invoice_row.organization_id <> seller_organization_id then
-      raise exception 'The linked Books invoice does not belong to the hotel organization';
+    if not found or invoice_row.organization_id <> seller_organization_id
+       or invoice_row.invoice_number <> 'MENU-' || order_row.order_number then
+      raise exception 'The linked Books invoice does not belong to this menu order';
     end if;
     invoice_uuid := invoice_row.id;
   else
@@ -226,19 +237,20 @@ begin
       order_row.tax_amount, tax_uuid, 'paid',
       'Digital menu order ' || order_row.order_number || ' (' || order_row.id || ')'
     ) returning id into invoice_uuid;
-  else
-    update public.books_invoices
-       set status = 'paid'
-     where id = invoice_uuid and status <> 'paid';
   end if;
 
   select * into invoice_row
     from public.books_invoices
    where id = invoice_uuid;
-  if invoice_row.status = 'void'
+  if not found or invoice_row.status = 'void'
+     or invoice_row.organization_id <> seller_organization_id
      or invoice_row.currency_code <> upper(order_row.currency)::char(3)
      or invoice_row.total <> order_row.total_amount then
     raise exception 'The Books invoice does not match the paid menu order';
+  end if;
+  if invoice_row.status <> 'paid' then
+    update public.books_invoices set status = 'paid' where id = invoice_uuid;
+    select * into invoice_row from public.books_invoices where id = invoice_uuid;
   end if;
 
   if not exists (select 1 from public.books_invoice_lines where invoice_id = invoice_uuid) then
@@ -246,14 +258,20 @@ begin
     select invoice_uuid, seller_organization_id, item_name, quantity, unit_price
       from public.menu_order_items
      where order_id = order_row.id;
-    if order_row.service_fee > 0 then
-      insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
-      values (invoice_uuid, seller_organization_id, 'Service fee', 1, order_row.service_fee);
-    end if;
-    if order_row.tip_amount > 0 then
-      insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
-      values (invoice_uuid, seller_organization_id, 'Tip', 1, order_row.tip_amount);
-    end if;
+  end if;
+  if order_row.service_fee > 0 and not exists (
+    select 1 from public.books_invoice_lines
+     where invoice_id = invoice_uuid and description = 'Service fee'
+  ) then
+    insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
+    values (invoice_uuid, seller_organization_id, 'Service fee', 1, order_row.service_fee);
+  end if;
+  if order_row.tip_amount > 0 and not exists (
+    select 1 from public.books_invoice_lines
+     where invoice_id = invoice_uuid and description = 'Tip'
+  ) then
+    insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
+    values (invoice_uuid, seller_organization_id, 'Tip', 1, order_row.tip_amount);
   end if;
 
   perform public.post_books_journal_entry(

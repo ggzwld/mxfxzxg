@@ -193,7 +193,7 @@ const BooksPage = () => {
     const account = accountById.get(line.account_id);
     return account?.type === type ? sum + Number(line[side]) : sum;
   }, 0);
-  const revenue = visibleInvoices.filter((invoice) => ["sent", "overdue", "paid"].includes(invoice.status)).reduce((sum, invoice) => sum + Number(invoice.subtotal), 0);
+  const revenue = currencyTotals.find((row) => row.currency_code.trim() === currency)?.income ?? 0;
   const expensesTotal = visibleExpenses.filter((expense) => expense.payment_status !== "refunded").reduce((sum, expense) => sum + Number(expense.amount) + Number(expense.tax_amount), 0);
   const assets = ledgerTotal("asset", "debit") - ledgerTotal("asset", "credit");
   const liabilities = ledgerTotal("liability", "credit") - ledgerTotal("liability", "debit");
