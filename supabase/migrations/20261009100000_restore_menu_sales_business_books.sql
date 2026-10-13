@@ -331,6 +331,9 @@ as $$
 declare
   order_row public.menu_orders%rowtype;
   posting_status text;
+  seller_organization_id uuid;
+  organization_count integer;
+  unmapped_item_count integer;
 begin
   select * into order_row
     from public.menu_orders
@@ -338,9 +341,21 @@ begin
    for update;
   if not found then raise exception 'Menu order was not found'; end if;
   if order_row.payment_status <> 'paid' then raise exception 'Only paid menu orders can be posted to Business Books'; end if;
+  seller_organization_id := order_row.organization_id;
+  if seller_organization_id is null then
+    select count(distinct item.organization_id), count(*) filter (where item.organization_id is null),
+           (array_agg(distinct item.organization_id) filter (where item.organization_id is not null))[1]
+      into organization_count, unmapped_item_count, seller_organization_id
+      from public.menu_order_items order_item
+      left join public.menu_items item on item.id = order_item.menu_item_id
+     where order_item.order_id = order_row.id;
+    if organization_count <> 1 or unmapped_item_count <> 0 then
+      raise exception 'Menu order does not map to exactly one hotel organization';
+    end if;
+  end if;
   if not exists (
     select 1 from public.books_memberships membership
-     where membership.organization_id = order_row.organization_id
+     where membership.organization_id = seller_organization_id
        and membership.user_id = auth.uid()
        and membership.role in ('owner', 'admin', 'manager')
   ) then raise exception 'Not authorized to retry this hotel invoice'; end if;
